@@ -1,71 +1,88 @@
 import streamlit as st
 from pymongo import MongoClient
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
-from streamlit_autorefresh import st_autorefresh
+import time
 
-# Configuración inicial
-st.set_page_config("Sanitas Bot Tracker", layout="wide", page_icon="🤖")
-st_autorefresh(interval=1000, key="refresh")  # Refrescar cada segundo
+# --- CONFIGURACIÓN ---
+st.set_page_config("Sanitas Bot Monitor", layout="centered")
+st.title("🤖 Estado Actual del Bot de Citas - Sanitas")
+
+# --- ZONA HORARIA ---
 TZ = pytz.timezone("America/Bogota")
 
-# Conectar a MongoDB
+# --- CONEXIÓN A MONGO ---
 MONGO_URI = st.secrets["mongo_uri"]
 client = MongoClient(MONGO_URI)
 db = client["sanitas_bot"]
 eventos = db["eventos"]
-estado = db["estado_actual"]
+intentos = db["intentos"]
+estado_actual = db["estado_actual"]
 
-# Leer estado actual del bot
-estado_doc = estado.find_one({"_id": "sanitas_estado"})
+# --- TABS ---
+tab1, tab2, tab3 = st.tabs(["🟢 Estado Actual", "📜 Eventos", "📌 Intentos"])
 
-st.title("🤖 Estado Actual del Bot de Citas - Sanitas")
+# ============================
+# 🟢 TAB 1 - ESTADO ACTUAL
+# ============================
+with tab1:
+    estado = estado_actual.find_one({"_id": "sanitas_estado"})
 
-if estado_doc:
-    paso = estado_doc.get("paso", "Desconocido")
-    inicio = estado_doc.get("inicio_sesion")
-    actualizacion = estado_doc.get("ultimo_update")
-    ciclos = estado_doc.get("ciclo", 0)
-    ip = estado_doc.get("ip", "N/A")
+    if estado:
+        paso = estado.get("paso", "-")
+        inicio = estado.get("inicio_sesion")
+        ciclo = estado.get("ciclo", 0)
+        actualizado = estado.get("ultimo_update")
 
-    if isinstance(inicio, datetime):
-        dt_inicio = inicio.astimezone(TZ)
-    else:
-        dt_inicio = datetime.now(TZ)  # fallback
+        dt_inicio = inicio.astimezone(TZ) if inicio else None
+        dt_update = actualizado.astimezone(TZ) if actualizado else None
 
-    duracion = datetime.now(TZ) - dt_inicio
-    horas, resto = divmod(duracion.seconds, 3600)
-    minutos, segundos = divmod(resto, 60)
-    duracion_str = f"{horas:02}h {minutos:02}m {segundos:02}s"
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("🔄 Paso actual", paso)
-    col2.metric("🕐 Tiempo desde inicio", duracion_str)
-    col3.metric("🔁 Ciclos ejecutados", ciclos)
-
-    st.caption(f"🌐 IP: `{ip}` • Última actualización: {actualizacion.astimezone(TZ).strftime('%Y-%m-%d %H:%M:%S')}")
-else:
-    st.warning("⚠️ El bot no ha iniciado sesión o no ha actualizado su estado aún.")
-
-# 🧠 Últimos eventos importantes
-st.subheader("📌 Últimos eventos relevantes")
-
-eventos_recientes = list(eventos.find().sort("timestamp", -1).limit(15))
-if eventos_recientes:
-    for ev in eventos_recientes:
-        tipo = ev.get("tipo", "Evento")
-        ts = ev["timestamp"].astimezone(TZ).strftime('%Y-%m-%d %H:%M:%S')
-        mensaje = ev.get("mensaje", "")
-        if tipo == "agenda_encontrada":
-            st.success(f"📅 {ts} — **¡Agenda encontrada!** {mensaje}")
-        elif tipo == "bloqueo":
-            st.error(f"🚫 {ts} — **Sesión bloqueada** {mensaje}")
-        elif tipo == "error_critico":
-            with st.expander(f"❌ {ts} — Error crítico"):
-                st.code(mensaje, language="bash")
-        elif tipo == "iframe_no_detectado":
-            st.warning(f"⚠️ {ts} — Problema con iframe: {mensaje}")
+        if dt_inicio:
+            tiempo_total = datetime.now(TZ) - dt_inicio
+            st.metric("🕐 Tiempo desde que arrancó la sesión actual", str(tiempo_total).split('.')[0])
         else:
-            st.info(f"ℹ️ {ts} — {tipo}: {mensaje}")
-else:
-    st.info("No hay eventos registrados aún.")
+            st.warning("No hay datos de inicio de sesión")
+
+        st.metric("🔁 Ciclos ejecutados", ciclo)
+        st.success(f"🔄 Paso actual: {paso}")
+        st.caption(f"Última actualización: {dt_update.strftime('%Y-%m-%d %H:%M:%S') if dt_update else '-'}")
+
+    else:
+        st.warning("No hay información disponible del estado actual.")
+
+# ============================
+# 📜 TAB 2 - HISTORIAL DE EVENTOS
+# ============================
+with tab2:
+    st.subheader("📜 Historial de Eventos")
+    rows = list(eventos.find().sort("timestamp", -1).limit(20))
+    if rows:
+        data = []
+        for ev in rows:
+            data.append({
+                "Tipo": ev.get("tipo", "-"),
+                "Mensaje": ev.get("mensaje", "-"),
+                "Fecha y Hora": ev["timestamp"].astimezone(TZ).strftime("%Y-%m-%d %H:%M:%S")
+            })
+        st.dataframe(data, use_container_width=True)
+    else:
+        st.info("No hay eventos recientes.")
+
+# ============================
+# 📌 TAB 3 - INTENTOS
+# ============================
+with tab3:
+    st.subheader("📌 Historial de Intentos")
+    rows = list(intentos.find().sort("timestamp", -1).limit(30))
+    if rows:
+        data = []
+        for idx, intento in enumerate(rows, start=1):
+            data.append({
+                "Intento": len(rows) - idx + 1,
+                "Estado": intento.get("estado", "-"),
+                "IP": intento.get("ip", "-"),
+                "Fecha y Hora": intento["timestamp"].astimezone(TZ).strftime("%Y-%m-%d %H:%M:%S")
+            })
+        st.dataframe(data, use_container_width=True)
+    else:
+        st.info("No hay intentos registrados.")
