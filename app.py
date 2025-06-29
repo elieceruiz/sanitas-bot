@@ -3,53 +3,86 @@ from pymongo import MongoClient
 from datetime import datetime, timedelta
 import pytz
 
-# Configuración de página
-st.set_page_config(page_title="Sanitas Bot - Dossier", layout="wide")
-st.title("🕵️ Dossier de movimientos recientes")
+# Config general
+st.set_page_config("Sanitas Bot Monitor", layout="centered")
+st.title("🩺 Monitor del Bot de Sanitas")
 
-st.markdown("""
-### 🔍 Seguimiento en tiempo real del bot
-Cada intento, hallazgo y anomalía queda registrado aquí. El sistema está bajo la lupa — y vos tenés el control.
-""")
-
-# Zona horaria Colombia
+# Zona horaria
 tz = pytz.timezone("America/Bogota")
 
-# Conexión a MongoDB
-client = MongoClient(st.secrets["mongo_uri"])
+# Conexion Mongo
+MONGO_URI = st.secrets["mongo_uri"]
+client = MongoClient(MONGO_URI)
 db = client["sanitas_bot"]
 eventos = db["eventos"]
 intentos = db["intentos"]
+estado_col = db["estado"]
 
-# Filtro de eventos recientes (por defecto, últimas 24 horas)
-hoy = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
-eventos_recientes = list(eventos.find({"timestamp": {"$gte": hoy}}).sort("timestamp", -1))
+# Estado actual
+doc_estado = estado_col.find_one({"_id": "sanitas_estado"})
+if doc_estado:
+    st.subheader("🔄 Estado Actual del Bot")
+    st.success(f"**Paso:** {doc_estado.get('paso', 'Desconocido')}")
 
-# Iconos por tipo de evento
+    inicio = doc_estado.get("inicio_sesion")
+    if inicio:
+        inicio_dt = datetime.fromisoformat(inicio).astimezone(tz)
+        duracion = datetime.now(tz) - inicio_dt
+        st.info(f"🕒 Sesion activa desde: {inicio_dt.strftime('%Y-%m-%d %H:%M:%S')} ({str(duracion).split('.')[0]})")
+
+    st.metric("🔁 Ciclos ejecutados", doc_estado.get("ciclo", 0))
+    st.text(f"IP actual: {doc_estado.get('ip', 'N/D')}")
+else:
+    st.warning("No se ha detectado estado actual del bot.")
+
+# Ultima agenda encontrada
+ultimo_exito = eventos.find_one({"tipo": "agenda_encontrada"}, sort=[("timestamp", -1)])
+if ultimo_exito:
+    ts = ultimo_exito["timestamp"].astimezone(tz)
+    desde = datetime.now(tz) - ts
+    st.subheader("📬 Ultima disponibilidad detectada")
+    st.info(f"Fecha: {ts.strftime('%Y-%m-%d %H:%M:%S')} ({str(desde).split('.')[0]} atrás)")
+
+# Ultima caida de sesion
+ultimo_bloqueo = eventos.find_one({"tipo": "bloqueo"}, sort=[("timestamp", -1)])
+if ultimo_bloqueo:
+    ts = ultimo_bloqueo["timestamp"].astimezone(tz)
+    desde = datetime.now(tz) - ts
+    st.subheader("🔒 Ultima caida de sesión")
+    st.error(f"Fecha: {ts.strftime('%Y-%m-%d %H:%M:%S')} ({str(desde).split('.')[0]} atrás)")
+
+# Racha de días consecutivos
+st.subheader("📆 Racha de búsqueda diaria")
+fechas = [i["timestamp"].astimezone(tz).date() for i in intentos.find({}, {"timestamp": 1})]
+fechas_unicas = sorted(set(fechas))
+
+racha = 0
+hoy = datetime.now(tz).date()
+for i in range(len(fechas_unicas)):
+    if hoy - timedelta(days=i) in fechas_unicas:
+        racha += 1
+    else:
+        break
+st.metric("🔥 Días consecutivos buscando", racha)
+
+# Historial visual
+st.subheader("🧾 Registro reciente")
+registros = eventos.find({}, sort=[("timestamp", -1)]).limit(15)
 iconos = {
     "agenda_encontrada": "📅",
-    "sin_agenda": "📥",
-    "error_critico": "❌",
-    "iframe_no_detectado": "⚠️",
     "bloqueo": "🔒",
+    "error_critico": "❌",
+    "iframe_no_detectado": "🖼️",
+    "inicio": "🚀",
+    "reinicio": "♻️",
+    "fin": "🛑",
 }
 
-# Mostrar tarjetas
-for ev in eventos_recientes[:25]:
-    tipo = ev.get("tipo", "evento")
-    icono = iconos.get(tipo, "🔹")
-    mensaje = ev.get("mensaje", "Sin mensaje")
-    hora = ev["timestamp"].astimezone(tz).strftime("%H:%M:%S")
-    fecha = ev["timestamp"].astimezone(tz).strftime("%Y-%m-%d")
-
+for reg in registros:
+    tipo = reg.get("tipo", "evento")
+    icono = iconos.get(tipo, "🔔")
+    hora = reg["timestamp"].astimezone(tz).strftime('%Y-%m-%d %H:%M:%S')
+    mensaje = reg.get("mensaje", "Sin mensaje")
     with st.container():
-        st.markdown(f"""
-        <div style='border-left: 6px solid #888; padding: 0.5em 1em; margin: 0.5em 0; background-color: #f9f9f9;'>
-            <span style='font-size: 1.2em;'>{icono} <strong>{tipo.replace('_', ' ').capitalize()}</strong></span><br>
-            <span style='color: #555;'>{mensaje}</span><br>
-            <span style='font-size: 0.85em; color: #999;'>🕛 {fecha} — {hora}</span>
-        </div>
-        """, unsafe_allow_html=True)
-
-if not eventos_recientes:
-    st.info("No hay eventos registrados hoy. El bot aún no ha sido ejecutado o no ha generado actividad.")
+        st.markdown(f"**{icono} {tipo.replace('_', ' ').capitalize()}** — `{hora}`\n> {mensaje}")
+        st.divider()
