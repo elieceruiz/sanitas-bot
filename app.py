@@ -3,69 +3,84 @@ from pymongo import MongoClient
 from datetime import datetime, timedelta
 import pytz
 
-# Configuración inicial
-st.set_page_config(page_title="Monitoreo Sanitas", layout="centered")
-st.title("🩺 Monitoreo de Bot - EPS Sanitas")
+# --- Configuración inicial ---
+st.set_page_config(page_title="Bot Sanitas - Estado", layout="centered")
+st.title("🤖 Estado del Bot de Sanitas")
 
-# Conexión a MongoDB Atlas
-client = MongoClient(st.secrets["mongo_uri"])
+# --- Zona horaria ---
+tz = pytz.timezone("America/Bogota")
+agora = datetime.now(tz)
+
+# --- Conexión a MongoDB ---
+MONGO_URI = st.secrets["mongo_uri"]
+client = MongoClient(MONGO_URI)
 db = client["sanitas_bot"]
 eventos = db["eventos"]
 intentos = db["intentos"]
-estado_col = db["estado_actual"]
+estado_actual = db["estado_actual"].find_one({"_id": "sanitas_estado"})
 
-# Zona horaria de Colombia
-tz = pytz.timezone("America/Bogota")
+# --- Estado del bot ---
+if estado_actual:
+    ultimo_update = estado_actual.get("ultimo_update")
+    paso = estado_actual.get("paso", "(desconocido)")
+    ciclo = estado_actual.get("ciclo", 0)
+    inicio_sesion = estado_actual.get("inicio_sesion")
+    ip = estado_actual.get("ip", "-")
 
-# ==============================
-# 🔄 Estado actual del bot
-# ==============================
-estado = estado_col.find_one({"_id": "sanitas_estado"})
+    tiempo_sin_update = agora - ultimo_update.astimezone(tz)
+    if tiempo_sin_update.total_seconds() > 300:
+        st.error(f"🛑 El bot NO está activo. Última actualización: {ultimo_update.strftime('%H:%M:%S')}")
+    else:
+        st.success(f"🟢 Bot activo — Paso actual: **{paso}**")
 
-if estado:
-    st.subheader("🔄 Estado Actual del Bot")
-    st.markdown(f"**Paso actual:** `{estado.get('paso', 'desconocido')}`")
-    st.markdown(f"**IP usada:** `{estado.get('ip', 'N/D')}`")
-    st.markdown(f"**Ciclos ejecutados:** `{estado.get('ciclo', 0)}`")
+    st.metric("Ciclos ejecutados", ciclo)
+    st.metric("IP última sesión", ip)
 
-    inicio = estado.get("inicio_sesion")
-    if inicio:
-        inicio_dt = inicio.astimezone(tz) if inicio.tzinfo else tz.localize(inicio)
-        tiempo_activo = datetime.now(tz) - inicio_dt
-        st.success(f"⏱️ Duración de la sesión: {str(tiempo_activo).split('.')[0]}")
-
-    st.caption(f"⏰ Última actualización: {estado.get('ultimo_update').astimezone(tz).strftime('%Y-%m-%d %H:%M:%S') if estado.get('ultimo_update') else 'N/D'}")
+    if inicio_sesion:
+        duracion_sesion = agora - inicio_sesion.astimezone(tz)
+        st.metric("🕒 Duración sesión", str(timedelta(seconds=int(duracion_sesion.total_seconds()))))
 else:
-    st.warning("No hay estado actual registrado.")
+    st.warning("No hay información disponible sobre el estado actual del bot.")
 
-# ==============================
-# 📊 Historial de Intentos
-# ==============================
-st.subheader("📊 Historial de Intentos")
-int_hist = list(intentos.find().sort("timestamp", -1).limit(20))
-if int_hist:
-    for intento in int_hist:
-        ts = intento["timestamp"].astimezone(tz).strftime("%Y-%m-%d %H:%M:%S")
-        st.write(f"[{ts}] — `{intento['estado']}` — IP: `{intento.get('ip', 'N/D')}`")
+st.markdown("---")
+
+# --- Racha de días consecutivos ---
+st.subheader("🔥 Racha de días con búsqueda")
+intentos_dias = intentos.distinct("timestamp")
+fechas = sorted({ts.astimezone(tz).date() for ts in intentos_dias})
+
+racha = 0
+hoy = agora.date()
+for i in range(len(fechas) - 1, -1, -1):
+    if fechas[i] == hoy - timedelta(days=racha):
+        racha += 1
+    else:
+        break
+st.metric("Días consecutivos de búsqueda", racha)
+
+st.markdown("---")
+
+# --- Última disponibilidad encontrada ---
+evento_disp = eventos.find_one({"tipo": "agenda_encontrada"}, sort=[("timestamp", -1)])
+if evento_disp:
+    hora_disp = evento_disp["timestamp"].astimezone(tz).strftime("%Y-%m-%d %H:%M:%S")
+    st.success(f"✅ Última disponibilidad detectada: {hora_disp}")
 else:
-    st.info("No hay intentos registrados.")
+    st.info("No se ha detectado ninguna disponibilidad aún.")
 
-# ==============================
-# 📅 Eventos relevantes
-# ==============================
-st.subheader("📅 Eventos Críticos")
-ev_hist = list(eventos.find().sort("timestamp", -1).limit(20))
-if ev_hist:
-    for ev in ev_hist:
-        ts = ev["timestamp"].astimezone(tz).strftime("%Y-%m-%d %H:%M:%S")
-        tipo = ev.get("tipo", "desconocido")
-        mensaje = ev.get("mensaje", "")
-        st.write(f"[{ts}] — **{tipo}**: {mensaje}")
-else:
-    st.info("No hay eventos críticos registrados.")
+# --- Último bloqueo o caída ---
+evento_bloqueo = eventos.find_one({"tipo": "error_critico"}, sort=[("timestamp", -1)])
+if evento_bloqueo:
+    hora_error = evento_bloqueo["timestamp"].astimezone(tz).strftime("%Y-%m-%d %H:%M:%S")
+    st.error(f"❌ Último error crítico: {hora_error}")
 
-# ==============================
-# ♻️ Refresco cada 3 segundos
-# ==============================
-from streamlit_autorefresh import st_autorefresh
-st_autorefresh(interval=3000, key="refresh")
+st.markdown("---")
+
+# --- Historial resumido ---
+st.subheader("📜 Historial reciente de eventos")
+eventos_recientes = eventos.find().sort("timestamp", -1).limit(10)
+for ev in eventos_recientes:
+    hora = ev["timestamp"].astimezone(tz).strftime("%Y-%m-%d %H:%M:%S")
+    tipo = ev.get("tipo", "sin_tipo")
+    mensaje = ev.get("mensaje", "")
+    st.markdown(f"- **{hora}** — `{tipo}` — {mensaje}")
