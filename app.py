@@ -4,85 +4,106 @@ from datetime import datetime, timedelta
 import pytz
 import time
 
-# --- CONFIGURACIÓN ---
-st.set_page_config("Sanitas Bot Monitor", layout="centered")
-st.title("🤖 Estado Actual del Bot de Citas - Sanitas")
+# --- Configuración inicial ---
+st.set_page_config("Bot Sanitas - Monitor", layout="wide")
+st.title("🤖 Estado del Bot de Citas - Sanitas")
 
-# --- ZONA HORARIA ---
+# --- Zona horaria ---
 TZ = pytz.timezone("America/Bogota")
 
-# --- CONEXIÓN A MONGO ---
+# --- Conexión a MongoDB ---
 MONGO_URI = st.secrets["mongo_uri"]
 client = MongoClient(MONGO_URI)
 db = client["sanitas_bot"]
 eventos = db["eventos"]
 intentos = db["intentos"]
-estado_actual = db["estado_actual"]
+estado = db["estado_actual"]
 
-# --- TABS ---
-tab1, tab2, tab3 = st.tabs(["🟢 Estado Actual", "📜 Eventos", "📌 Intentos"])
+# --- Función para calcular cronómetro ---
+def calcular_duracion(inicio):
+    ahora = datetime.now(TZ)
+    dt_inicio = inicio.astimezone(TZ)
+    delta = ahora - dt_inicio
+    return str(timedelta(seconds=int(delta.total_seconds())))
 
-# ============================
-# 🟢 TAB 1 - ESTADO ACTUAL
-# ============================
-with tab1:
-    estado = estado_actual.find_one({"_id": "sanitas_estado"})
+# --- Lectura del estado actual ---
+estado_actual = estado.find_one({"_id": "sanitas_estado"})
 
-    if estado:
-        paso = estado.get("paso", "-")
-        inicio = estado.get("inicio_sesion")
-        ciclo = estado.get("ciclo", 0)
-        actualizado = estado.get("ultimo_update")
+col1, col2, col3 = st.columns([3, 2, 2])
 
-        dt_inicio = inicio.astimezone(TZ) if inicio else None
-        dt_update = actualizado.astimezone(TZ) if actualizado else None
-
-        if dt_inicio:
-            tiempo_total = datetime.now(TZ) - dt_inicio
-            st.metric("🕐 Tiempo desde que arrancó la sesión actual", str(tiempo_total).split('.')[0])
-        else:
-            st.warning("No hay datos de inicio de sesión")
-
-        st.metric("🔁 Ciclos ejecutados", ciclo)
-        st.success(f"🔄 Paso actual: {paso}")
-        st.caption(f"Última actualización: {dt_update.strftime('%Y-%m-%d %H:%M:%S') if dt_update else '-'}")
-
+with col1:
+    st.subheader("🔄 Paso actual")
+    if estado_actual:
+        paso = estado_actual.get("paso", "Desconocido")
+        st.markdown(f"### {paso}")
     else:
-        st.warning("No hay información disponible del estado actual.")
+        st.warning("No hay estado en ejecución. El bot podría estar detenido.")
 
-# ============================
-# 📜 TAB 2 - HISTORIAL DE EVENTOS
-# ============================
-with tab2:
-    st.subheader("📜 Historial de Eventos")
-    rows = list(eventos.find().sort("timestamp", -1).limit(20))
-    if rows:
-        data = []
-        for ev in rows:
-            data.append({
-                "Tipo": ev.get("tipo", "-"),
-                "Mensaje": ev.get("mensaje", "-"),
-                "Fecha y Hora": ev["timestamp"].astimezone(TZ).strftime("%Y-%m-%d %H:%M:%S")
-            })
-        st.dataframe(data, use_container_width=True)
+with col2:
+    st.subheader("🕐 Tiempo desde inicio")
+    if estado_actual and "inicio_sesion" in estado_actual:
+        duracion = calcular_duracion(estado_actual["inicio_sesion"])
+        st.success(f"⏱️ {duracion}")
+    else:
+        st.info("No hay sesión activa")
+
+with col3:
+    st.subheader("🔁 Ciclos ejecutados")
+    if estado_actual:
+        st.metric("Total ciclos", estado_actual.get("ciclo", 0))
+        ip = estado_actual.get("ip", "?")
+        st.caption(f"📡 IP: {ip}")
+
+# --- Tabs con secciones ---
+tabs = st.tabs(["📜 Eventos", "📊 Intentos", "📈 Resumen racha"])
+
+# --- 📜 EVENTOS ---
+with tabs[0]:
+    st.subheader("Historial reciente de eventos")
+    ultimos_eventos = list(eventos.find().sort("timestamp", -1).limit(50))
+    if ultimos_eventos:
+        for ev in ultimos_eventos:
+            ts = ev["timestamp"].astimezone(TZ).strftime("%Y-%m-%d %H:%M:%S")
+            tipo = ev["tipo"].replace("_", " ").capitalize()
+            mensaje = ev.get("mensaje", "")
+            with st.expander(f"{ts} — {tipo}", expanded=False):
+                st.write(mensaje)
     else:
         st.info("No hay eventos recientes.")
 
-# ============================
-# 📌 TAB 3 - INTENTOS
-# ============================
-with tab3:
-    st.subheader("📌 Historial de Intentos")
-    rows = list(intentos.find().sort("timestamp", -1).limit(30))
-    if rows:
-        data = []
-        for idx, intento in enumerate(rows, start=1):
-            data.append({
-                "Intento": len(rows) - idx + 1,
-                "Estado": intento.get("estado", "-"),
-                "IP": intento.get("ip", "-"),
-                "Fecha y Hora": intento["timestamp"].astimezone(TZ).strftime("%Y-%m-%d %H:%M:%S")
+# --- 📊 INTENTOS ---
+with tabs[1]:
+    st.subheader("Últimos intentos de búsqueda")
+    datos = list(intentos.find().sort("timestamp", -1))
+    if datos:
+        tabla = []
+        for doc in datos:
+            ts = doc["timestamp"].astimezone(TZ).strftime("%Y-%m-%d %H:%M:%S")
+            tabla.append({
+                "#": "",
+                "Fecha y hora": ts,
+                "Estado": doc.get("estado", "?").capitalize(),
+                "IP": doc.get("ip", "?")
             })
-        st.dataframe(data, use_container_width=True)
+        for idx, fila in enumerate(tabla):
+            fila["#"] = len(tabla) - idx
+        st.dataframe(tabla, use_container_width=True)
     else:
-        st.info("No hay intentos registrados.")
+        st.info("Sin intentos registrados.")
+
+# --- 📈 RESUMEN RACHA ---
+with tabs[2]:
+    st.subheader("📅 Racha de días consecutivos en búsqueda")
+    fechas = set([i["timestamp"].astimezone(TZ).date() for i in datos])
+    hoy = datetime.now(TZ).date()
+    racha = 0
+    for i in range(0, 30):
+        dia = hoy - timedelta(days=i)
+        if dia in fechas:
+            racha += 1
+        else:
+            break
+    st.success(f"🔥 {racha} días consecutivos ejecutando el bot")
+
+# --- Autorefresh cada segundo ---
+st.experimental_rerun()
