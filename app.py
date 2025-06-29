@@ -1,88 +1,87 @@
 import streamlit as st
 from pymongo import MongoClient
 from datetime import datetime, timedelta
-import pytz
 from streamlit_autorefresh import st_autorefresh
-import time
+import pytz
 
-# --- CONFIGURACIÓN ---
-st.set_page_config("🩺 Estado del Bot Sanitas", layout="centered")
-tz = pytz.timezone("America/Bogota")
+# Configuración
+st.set_page_config("Sanitas Bot - Estado", layout="wide")
+st_autorefresh(interval=5000, limit=None, key="refresh")
 
-# --- REFRESH AUTOMÁTICO ---
-st_autorefresh(interval=5000, key="refresh")  # cada 5 segundos
+st.title("🤖 Estado Actual del Bot de Citas - Sanitas")
 
-# --- SECRETO DE MONGO ---
-MONGO_URI = st.secrets["mongo_uri"]
-client = MongoClient(MONGO_URI)
+# Zona horaria y conexión
+TZ = pytz.timezone("America/Bogota")
+client = MongoClient(st.secrets["mongo_uri"])
 db = client["sanitas_bot"]
 eventos = db["eventos"]
 intentos = db["intentos"]
-estado_actual = db["estado_actual"]
+estado = db["estado_actual"]
 
-# --- ESTADO ACTUAL ---
-actual = estado_actual.find_one({"_id": "sanitas_estado"})
-if actual:
-    paso = actual.get("paso", "-")
-    inicio_sesion = actual.get("inicio_sesion")
-    ciclo = actual.get("ciclo", 0)
-    ip = actual.get("ip", "desconocida")
-    
-    st.title("📡 Monitoreo en Tiempo Real del Bot")
-    st.markdown(f"**Paso actual:** `{paso}`")
-    st.markdown(f"**Ciclo actual:** `{ciclo}`")
-    st.markdown(f"**IP:** `{ip}`")
-
-    # Cronómetro desde inicio_sesion
-    if inicio_sesion:
-        inicio_dt = inicio_sesion.astimezone(tz)
-        segundos = int((datetime.now(tz) - inicio_dt).total_seconds())
-        duracion = str(timedelta(seconds=segundos))
-        st.markdown(f"⏱️ Sesión activa desde: `{inicio_dt.strftime('%H:%M:%S')}`")
-        st.markdown(f"### 🕒 Duración: {duracion}")
+# Leer estado actual
+doc_estado = estado.find_one({"_id": "sanitas_estado"})
+if doc_estado:
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("🔄 Paso actual", doc_estado.get("paso", "Desconocido"))
+    with col2:
+        inicio = doc_estado.get("inicio_sesion")
+        if inicio:
+            dt_inicio = datetime.fromisoformat(inicio).astimezone(TZ)
+            duracion = datetime.now(TZ) - dt_inicio
+            st.metric("🕒 Duración de la sesión", str(timedelta(seconds=int(duracion.total_seconds()))))
+        else:
+            st.warning("Sesín no iniciada")
+    with col3:
+        st.metric("🔁 Ciclos ejecutados", doc_estado.get("ciclo", 0))
 else:
-    st.title("🔴 Bot no está activo")
-    st.warning("No se ha detectado un ciclo activo del bot en ejecución.")
+    st.error("El bot no ha actualizado su estado.")
 
-# --- RACHAS DE DÍAS ---
-st.subheader("📆 Racha de días consecutivos de búsqueda")
-fechas = list(intentos.find().sort("timestamp", -1))
-fechas_unicas = sorted(set(e["timestamp"].astimezone(tz).date() for e in fechas), reverse=True)
+# Últimos eventos
+st.subheader("📜 Historial reciente")
+recientes = list(eventos.find().sort("timestamp", -1).limit(10))
 
-racha = 0
-hoy = datetime.now(tz).date()
-for i, dia in enumerate(fechas_unicas):
-    if dia == hoy - timedelta(days=i):
+for ev in recientes:
+    tipo = ev.get("tipo", "evento")
+    ts = ev["timestamp"].astimezone(TZ).strftime("%Y-%m-%d %H:%M:%S")
+    msj = ev.get("mensaje", "")
+    if tipo == "agenda_encontrada":
+        st.success(f"📬 {ts} — **Agenda disponible**")
+    elif tipo == "error_critico":
+        with st.expander(f"❌ {ts} — Error Crítico"):
+            st.error(msj)
+    elif tipo == "bloqueo" or "redirect" in tipo:
+        st.warning(f"🚫 {ts} — Sesion tumbada o redirigida")
+    else:
+        st.info(f"ℹ️ {ts} — {msj}")
+
+# Racha
+st.subheader("🔥 Racha de búsqueda")
+fechas_intentos = list(intentos.find().sort("timestamp", -1))
+fechas = sorted(list(set([i["timestamp"].astimezone(TZ).date() for i in fechas_intentos])))
+
+racha = 1
+for i in range(1, len(fechas)):
+    if (fechas[i-1] - fechas[i]).days == 1:
         racha += 1
     else:
         break
-st.markdown(f"**🔥 Racha actual:** `{racha}` días consecutivos ejecutando el bot")
+st.info(f"Días consecutivos con ejecución del bot: **{racha}**")
 
-# --- ÚLTIMA DISPONIBILIDAD / BLOQUEO ---
-st.subheader("📬 Últimos eventos clave")
-ultima_agenda = eventos.find_one({"tipo": "agenda_encontrada"}, sort=[("timestamp", -1)])
-ultimo_bloqueo = eventos.find_one({"tipo": "error_critico"}, sort=[("timestamp", -1)])
+# Desde última agenda encontrada
+ult_agenda = eventos.find_one({"tipo": "agenda_encontrada"}, sort=[("timestamp", -1)])
+if ult_agenda:
+    ts_agenda = ult_agenda["timestamp"].astimezone(TZ)
+    segundos = int((datetime.now(TZ) - ts_agenda).total_seconds())
+    dur = str(timedelta(seconds=segundos))
+    st.success(f"⏱️ Tiempo desde última agenda: {dur}")
 
-if ultima_agenda:
-    st.success(f"📅 Última agenda detectada: `{ultima_agenda['timestamp'].astimezone(tz).strftime('%Y-%m-%d %H:%M:%S')}`")
-if ultimo_bloqueo:
-    with st.expander("❌ Último error crítico", expanded=False):
-        st.error(f"{ultimo_bloqueo['timestamp'].astimezone(tz).strftime('%Y-%m-%d %H:%M:%S')}\n\n{ultimo_bloqueo['mensaje']}")
+# Desde último resultado distinto a "sin agenda"
+ult_dif = intentos.find_one({"estado": {"$ne": "Sin agenda"}}, sort=[("timestamp", -1)])
+if ult_dif:
+    ts_dif = ult_dif["timestamp"].astimezone(TZ)
+    segundos = int((datetime.now(TZ) - ts_dif).total_seconds())
+    st.warning(f"⏱️ Tiempo desde último resultado diferente a 'Sin agenda': {str(timedelta(seconds=segundos))}")
 
-# --- HISTORIAL DE EVENTOS ---
-st.subheader("🧾 Registro de actividad reciente")
-eventos_recientes = list(eventos.find().sort("timestamp", -1).limit(30))
-if eventos_recientes:
-    for ev in eventos_recientes:
-        color = "🟢"
-        if ev["tipo"] == "error_critico":
-            color = "❌"
-        elif ev["tipo"] == "agenda_encontrada":
-            color = "📅"
-        elif ev["tipo"] == "iframe_no_detectado":
-            color = "⚠️"
-        hora = ev["timestamp"].astimezone(tz).strftime("%Y-%m-%d %H:%M:%S")
-        with st.expander(f"{color} {ev['tipo']} — {hora}", expanded=False):
-            st.write(ev.get("mensaje", "(Sin mensaje)"))
-else:
-    st.info("Sin eventos recientes.")
+# Footer
+st.caption("Desarrollado por Eliecer Ruiz - Seguimiento del bot de Sanitas EPS")
