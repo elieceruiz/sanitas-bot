@@ -106,4 +106,4 @@ with tabs[2]:
     st.success(f"🔥 {racha} días consecutivos ejecutando el bot")
 
 # --- Autorefresh cada segundo ---
-st.experimental_rerun()
+st.rerun()
